@@ -3956,8 +3956,10 @@ dependencies = [
  "reth-chainspec",
  "reth-consensus",
  "reth-ethereum-primitives",
+ "reth-execution-types",
  "reth-node-builder",
  "reth-primitives",
+ "reth-primitives-traits",
  "reth-tasks",
  "serde",
 ]

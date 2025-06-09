@@ -21,6 +21,8 @@ reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", branch
 reth-consensus= { git = "https://github.com/paradigmxyz/reth", branch = "main", package = "reth-consensus" }
 reth-ethereum = { git = "https://github.com/paradigmxyz/reth", branch = "main", package = "reth-ethereum" }
 reth-primitives = { git = "https://github.com/paradigmxyz/reth", branch = "main", package = "reth-primitives" }
+reth-execution-types = { git = "https://github.com/paradigmxyz/reth", branch = "main", package = "reth-execution-types" }
+reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth", branch = "main", package = "reth-primitives-traits" }
 
 # Alloy dependencies
 alloy = { version = "1.0.9", default-features = false }

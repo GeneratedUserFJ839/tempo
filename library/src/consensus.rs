@@ -1,7 +1,8 @@
 use reth_chainspec::ChainSpec;
-use reth_consensus::{Consensus, ConsensusError, HeaderValidator };
+use reth_consensus::{Consensus, ConsensusError, HeaderValidator, FullConsensus};
 use reth_node_builder::{Block, components::ConsensusBuilder, BuilderContext, FullNodeTypes};
 use reth_primitives::{SealedHeader, SealedBlock};
+use reth_execution_types::BlockExecutionResult;
 
 use std::sync::Arc;
 
@@ -16,29 +17,53 @@ impl MalachiteConsensus {
     }
 }
 
+impl<H> HeaderValidator<H> for MalachiteConsensus {
+    fn validate_header(&self, _header: &SealedHeader<H>) -> Result<(), ConsensusError> {
+        // For now, return Ok - implement validation logic here
+        Ok(())
+    }
+
+    fn validate_header_against_parent(&self, _header: &SealedHeader<H>, _parent: &SealedHeader<H>) -> Result<(), ConsensusError> {
+        // For now, return Ok - implement validation logic here
+        Ok(())
+    }
+}
+
 impl<B> Consensus<B> for MalachiteConsensus
 where B: Block {
     type Error = ConsensusError;
 
-    fn validate_body_against_header(&self, body: &B::Body, header: &SealedHeader<B::Header> ,) -> Result<(),Self::Error> {
+    fn validate_body_against_header(&self, _body: &B::Body, _header: &SealedHeader<B::Header>) -> Result<(),Self::Error> {
         Ok(())
     }
 
-    fn validate_block_pre_execution(&self, block: &SealedBlock<B>) -> Result<(),Self::Error> {
+    fn validate_block_pre_execution(&self, _block: &SealedBlock<B>) -> Result<(),Self::Error> {
         Ok(())
     }
 }
-#[derive(Debug)]
-pub struct MalachiteConsensusBuilder<B> {}
 
-impl<Node, B> ConsensusBuilder<Node> for MalachiteConsensusBuilder<B>
+impl<N> FullConsensus<N> for MalachiteConsensus 
+where N: reth_primitives_traits::NodePrimitives,
+{
+    fn validate_block_post_execution(
+        &self,
+        _block: &reth_primitives_traits::RecoveredBlock<N::Block>,
+        _result: &BlockExecutionResult<N::Receipt>,
+    ) -> Result<(), ConsensusError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct MalachiteConsensusBuilder;
+
+impl<Node> ConsensusBuilder<Node> for MalachiteConsensusBuilder
 where
     Node: FullNodeTypes,
-    B: Block + HeaderValidator<B::Header>,
 {
     type Consensus = Arc<MalachiteConsensus>;
 
     async fn build_consensus(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
-       Ok(())
+        Ok(Arc::new(MalachiteConsensus::new(ctx.chain_spec())))
     }
 }
