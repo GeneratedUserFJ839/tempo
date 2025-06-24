@@ -1,7 +1,6 @@
 use crate::height::Height;
 use crate::provider::{Ed25519Provider, PublicKey};
 use crate::types::Address;
-use bytes::Bytes;
 use hex;
 use malachitebft_core_types::{
     Address as MalachiteAddress, Context, Extension as MalachiteExtension, NilOrVal,
@@ -14,7 +13,7 @@ use std::fmt;
 use std::fmt::Display;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct RoundWrapper(Round);
+pub struct RoundWrapper(pub Round);
 
 impl From<Round> for RoundWrapper {
     fn from(r: Round) -> Self {
@@ -29,7 +28,7 @@ impl From<RoundWrapper> for Round {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct VoteTypeWrapper(VoteType);
+pub struct VoteTypeWrapper(pub VoteType);
 
 impl From<VoteType> for VoteTypeWrapper {
     fn from(vt: VoteType) -> Self {
@@ -49,7 +48,19 @@ pub struct MalachiteContext {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct BasePeerAddress(Address);
+pub struct BasePeerAddress(pub Address);
+
+impl BasePeerAddress {
+    pub fn new(addr: Address) -> Self {
+        Self(addr)
+    }
+}
+
+impl From<Address> for BasePeerAddress {
+    fn from(addr: Address) -> Self {
+        Self(addr)
+    }
+}
 
 impl Display for BasePeerAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -164,7 +175,7 @@ pub struct BaseValue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct ValueIdWrapper(Vec<u8>);
+pub struct ValueIdWrapper(pub Vec<u8>);
 
 impl ValueIdWrapper {
     pub fn new(data: Vec<u8>) -> Self {
@@ -186,7 +197,7 @@ impl std::fmt::Display for ValueIdWrapper {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseVote {
     pub vote_type: VoteTypeWrapper,
     pub height: Height,
@@ -194,6 +205,26 @@ pub struct BaseVote {
     pub value_id: NilOrVal<ValueIdWrapper>,
     pub voter: BasePeerAddress,
     pub extension: Option<SignedMessage<MalachiteContext, BaseExtension>>,
+}
+
+impl PartialOrd for BaseVote {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for BaseVote {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Compare all fields except extension
+        self.vote_type
+            .cmp(&other.vote_type)
+            .then_with(|| self.height.cmp(&other.height))
+            .then_with(|| self.round.cmp(&other.round))
+            .then_with(|| self.value_id.cmp(&other.value_id))
+            .then_with(|| self.voter.cmp(&other.voter))
+            // For extension, we just compare presence
+            .then_with(|| self.extension.is_some().cmp(&other.extension.is_some()))
+    }
 }
 
 impl MalachiteVote<MalachiteContext> for BaseVote {
@@ -322,37 +353,3 @@ impl Context for MalachiteContext {
         }
     }
 }
-
-// Codec implementation for serialization
-#[derive(Copy, Clone, Debug)]
-pub struct ProtoCodec;
-
-// For now, we'll use a placeholder implementation
-// In production, this would implement proper protobuf encoding/decoding
-impl malachitebft_codec::Codec<BaseValue> for ProtoCodec {
-    type Error = std::io::Error;
-
-    fn decode(&self, bytes: Bytes) -> Result<BaseValue, Self::Error> {
-        Ok(BaseValue { data: bytes.to_vec() })
-    }
-
-    fn encode(&self, msg: &BaseValue) -> Result<Bytes, Self::Error> {
-        Ok(Bytes::from(msg.data.clone()))
-    }
-}
-
-impl malachitebft_codec::Codec<BaseProposalPart> for ProtoCodec {
-    type Error = std::io::Error;
-
-    fn decode(&self, _bytes: Bytes) -> Result<BaseProposalPart, Self::Error> {
-        // Placeholder implementation
-        Err(std::io::Error::new(std::io::ErrorKind::Other, "Not implemented"))
-    }
-
-    fn encode(&self, _msg: &BaseProposalPart) -> Result<Bytes, Self::Error> {
-        // Placeholder implementation
-        Err(std::io::Error::new(std::io::ErrorKind::Other, "Not implemented"))
-    }
-}
-
-// Add other codec implementations as needed for the consensus engine
