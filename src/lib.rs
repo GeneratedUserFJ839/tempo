@@ -62,6 +62,7 @@ pub mod context;
 pub mod height;
 pub mod proto;
 pub mod provider;
+pub mod store;
 pub mod types;
 pub mod utils;
 
