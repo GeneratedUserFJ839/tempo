@@ -7,6 +7,8 @@ use crate::{
     utils::seed_from_address,
     ProposalPart, Value,
 };
+use alloy_primitives::B256;
+use alloy_rpc_types_engine::{ForkchoiceState, PayloadStatusEnum};
 use bytes::Bytes;
 use eyre::Result;
 use malachitebft_app_channel::app::{
@@ -18,16 +20,17 @@ use malachitebft_core_types::{
 };
 use rand::{rngs::StdRng, SeedableRng};
 use reth_engine_primitives::BeaconConsensusEngineHandle;
-use reth_node_builder::NodeTypes;
+use reth_node_builder::{NodeTypes, PayloadTypes};
 use reth_node_ethereum::EthereumNode;
+use reth_payload_builder::{PayloadBuilderHandle, PayloadStore};
+use reth_payload_primitives::{EngineApiMessageVersion, PayloadKind};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
-    time::Duration,
 };
-use tokio::{sync::Mutex as TokioMutex, time::sleep};
-use tracing::info;
+use tokio::sync::Mutex as TokioMutex;
+use tracing::{info, warn};
 
 /// Thread-safe wrapper for StdRng
 #[derive(Debug)]
@@ -59,6 +62,29 @@ impl Clone for ThreadSafeRng {
     }
 }
 
+// Manual Clone implementation for State since PayloadStore doesn't implement Clone
+impl Clone for State {
+    fn clone(&self) -> Self {
+        Self {
+            ctx: self.ctx.clone(),
+            config: self.config.clone(),
+            genesis: self.genesis.clone(),
+            address: self.address,
+            store: self.store.clone(),
+            signing_provider: self.signing_provider.clone(),
+            engine_handle: self.engine_handle.clone(),
+            payload_store: Arc::clone(&self.payload_store),
+            current_height: Arc::clone(&self.current_height),
+            current_round: Arc::clone(&self.current_round),
+            current_proposer: Arc::clone(&self.current_proposer),
+            current_role: Arc::clone(&self.current_role),
+            peers: Arc::clone(&self.peers),
+            streams_map: Arc::clone(&self.streams_map),
+            rng: self.rng.clone(),
+        }
+    }
+}
+
 /// State represents the application state for the Malachite-Reth integration.
 /// It manages consensus state, validator information, and block production.
 ///
@@ -82,7 +108,6 @@ impl Clone for ThreadSafeRng {
 /// - **State Management**: `current_height()`, `current_round()`, `get_validator_set()`
 /// - **Storage Access**: `store_synced_proposal()`, `get_proposal_for_restreaming()`
 /// - **Peer Management**: `add_peer()`, `remove_peer()`, `get_peers()`
-#[derive(Clone)]
 pub struct State {
     // Immutable fields (no synchronization needed)
     pub ctx: MalachiteContext,
@@ -92,6 +117,7 @@ pub struct State {
     store: Store, // Already thread-safe
     pub signing_provider: Ed25519Provider,
     pub engine_handle: BeaconConsensusEngineHandle<<EthereumNode as NodeTypes>::Payload>,
+    pub payload_store: Arc<PayloadStore<<EthereumNode as NodeTypes>::Payload>>,
 
     // Mutable fields wrapped in RwLock for concurrent read/write access
     current_height: Arc<RwLock<Height>>,
@@ -113,7 +139,10 @@ impl State {
         address: Address,
         store: Store,
         engine_handle: BeaconConsensusEngineHandle<<EthereumNode as NodeTypes>::Payload>,
+        payload_builder_handle: PayloadBuilderHandle<<EthereumNode as NodeTypes>::Payload>,
     ) -> Self {
+        let payload_store = Arc::new(PayloadStore::new(payload_builder_handle));
+
         Self {
             ctx,
             config,
@@ -122,6 +151,7 @@ impl State {
             store,
             signing_provider: Ed25519Provider::new_test(),
             engine_handle,
+            payload_store,
             current_height: Arc::new(RwLock::new(Height::default())),
             current_round: Arc::new(RwLock::new(Round::Nil)),
             current_proposer: Arc::new(RwLock::new(None)),
@@ -143,6 +173,7 @@ impl State {
         address: Address,
         provider: Arc<P>,
         engine_handle: BeaconConsensusEngineHandle<<EthereumNode as NodeTypes>::Payload>,
+        payload_builder_handle: PayloadBuilderHandle<<EthereumNode as NodeTypes>::Payload>,
     ) -> Result<Self>
     where
         P: reth_provider::DatabaseProviderFactory + Clone + Unpin + Send + Sync + 'static,
@@ -160,6 +191,7 @@ impl State {
             address,
             store,
             engine_handle,
+            payload_builder_handle,
         ))
     }
 
@@ -278,14 +310,58 @@ impl State {
         height: Height,
         round: Round,
     ) -> Result<LocallyProposedValue<MalachiteContext>> {
-        // Simulate building a block
-        sleep(Duration::from_millis(100)).await;
+        // 1. Create payload attributes for the block at this height
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
 
-        // Create an empty block for now - in real implementation this would use reth's block builder
-        let block = self.create_empty_block(height.as_u64());
-        let value = Value::new(block);
+        let parent_hash = self.get_parent_hash(height).await?;
 
-        info!("Proposed value for height {} round {}", height, round);
+        let payload_attrs = alloy_rpc_types_engine::PayloadAttributes {
+            timestamp,
+            prev_randao: B256::ZERO, // For PoS compatibility
+            suggested_fee_recipient: self.config.fee_recipient,
+            withdrawals: Some(vec![]), // Empty withdrawals for post-Shanghai
+            parent_beacon_block_root: Some(B256::ZERO),
+        };
+
+        // 2. Send FCU to trigger payload building
+        let forkchoice_state = ForkchoiceState {
+            head_block_hash: parent_hash,
+            safe_block_hash: parent_hash,
+            finalized_block_hash: self.get_finalized_hash().await?,
+        };
+
+        let fcu_response = self
+            .engine_handle
+            .fork_choice_updated(
+                forkchoice_state,
+                Some(payload_attrs),
+                EngineApiMessageVersion::V3,
+            )
+            .await?;
+
+        // 3. Get the payload ID from the response
+        let payload_id = fcu_response
+            .payload_id
+            .ok_or_else(|| eyre::eyre!("No payload ID returned from FCU"))?;
+
+        // 4. Get the built payload - use WaitForPending to wait for at least one built payload
+        // This will wait for the payload builder to produce a payload with transactions
+        // It won't return an empty payload immediately like Earliest would
+        let payload = self
+            .payload_store
+            .resolve_kind(payload_id, PayloadKind::WaitForPending)
+            .await
+            .ok_or_else(|| eyre::eyre!("No payload found for id {:?}", payload_id))??;
+
+        let sealed_block = payload.block();
+        let value = Value::new(sealed_block.clone_block());
+
+        info!(
+            "Proposed value for height {} round {} with payload {:?}",
+            height, round, payload_id
+        );
 
         let locally_proposed = LocallyProposedValue::new(height, round, value.clone());
 
@@ -364,20 +440,52 @@ impl State {
             }
         }
 
-        // If we still don't have the value, use a placeholder
-        // In a production system, this would be an error condition
-        let value = value.unwrap_or_else(|| {
-            tracing::warn!(
-                "Could not find proposal for value_id {:?} at height {} - using placeholder",
+        // If we still don't have the value, this is an error
+        let value = value.ok_or_else(|| {
+            eyre::eyre!(
+                "Could not find proposal for value_id {:?} at height {}",
                 value_id,
                 height
-            );
-            // Create an empty block as placeholder
-            Value::new(self.create_empty_block(height.as_u64()))
-        });
+            )
+        })?;
 
-        // Store the decided value
-        self.store.store_decided_value(certificate, value).await?;
+        // 1. Store the decided value first (for persistence)
+        self.store
+            .store_decided_value(certificate, value.clone())
+            .await?;
+
+        // 2. Convert the block to execution payload and send new_payload to validate it
+        let block = &value.block;
+        let sealed_block = reth_primitives::SealedBlock::seal_slow(block.clone());
+        let payload =
+            <reth_node_ethereum::EthEngineTypes as PayloadTypes>::block_to_payload(sealed_block);
+        let payload_status = self.engine_handle.new_payload(payload).await?;
+
+        if payload_status.status != PayloadStatusEnum::Valid {
+            return Err(eyre::eyre!("Invalid payload status: {:?}", payload_status));
+        }
+
+        // 3. Update fork choice to make this block canonical
+        let block_hash = block.header.hash_slow();
+        let forkchoice_state = ForkchoiceState {
+            head_block_hash: block_hash,
+            safe_block_hash: block_hash, // In Malachite with instant finality, head = safe = finalized
+            finalized_block_hash: block_hash, // Instant finality means committed = finalized
+        };
+
+        let fcu_response = self
+            .engine_handle
+            .fork_choice_updated(forkchoice_state, None, EngineApiMessageVersion::V3)
+            .await?;
+
+        if fcu_response.payload_status.status != PayloadStatusEnum::Valid {
+            return Err(eyre::eyre!("Invalid FCU response: {:?}", fcu_response));
+        }
+
+        info!(
+            "Successfully committed block at height {} with hash {}",
+            height, block_hash
+        );
 
         Ok(())
     }
@@ -396,50 +504,6 @@ impl State {
     /// Gets the earliest available height
     pub async fn get_earliest_height(&self) -> Height {
         Height::INITIAL // Start from height 1
-    }
-
-    /// Creates an empty block for testing purposes
-    /// In production, this would use reth's block builder with the transaction pool
-    fn create_empty_block(&self, block_number: u64) -> reth_primitives::Block {
-        use alloy_consensus::Header;
-        use alloy_primitives::{keccak256, U256};
-
-        let header = Header {
-            number: block_number,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            parent_hash: if block_number > 0 {
-                // In real implementation, get parent hash from storage
-                keccak256(block_number.to_be_bytes())
-            } else {
-                Default::default()
-            },
-            state_root: Default::default(),
-            transactions_root: Default::default(),
-            receipts_root: Default::default(),
-            logs_bloom: Default::default(),
-            ommers_hash: Default::default(),
-            difficulty: U256::ZERO,
-            gas_limit: 30_000_000,
-            gas_used: 0,
-            beneficiary: Default::default(),
-            mix_hash: Default::default(),
-            nonce: Default::default(),
-            extra_data: Default::default(),
-            base_fee_per_gas: Some(1_000_000_000), // 1 gwei
-            withdrawals_root: Some(Default::default()),
-            blob_gas_used: Some(0),
-            excess_blob_gas: Some(0),
-            parent_beacon_block_root: Some(Default::default()),
-            requests_hash: None,
-        };
-
-        reth_primitives::Block {
-            header,
-            body: Default::default(), // Empty body
-        }
     }
 
     /// Gets a previously built value for reuse
@@ -602,6 +666,67 @@ impl State {
             .get_undecided_proposal(height, round, value_id)
             .await
     }
+
+    /// Get the parent hash for a given height
+    async fn get_parent_hash(&self, height: Height) -> Result<B256> {
+        if height.as_u64() == 0 {
+            return Ok(self.genesis.genesis_hash);
+        }
+
+        let parent_height = Height(height.as_u64() - 1);
+        let parent = self
+            .get_decided_value(parent_height)
+            .await
+            .ok_or_else(|| eyre::eyre!("Parent block not found at height {}", parent_height))?;
+
+        Ok(parent.value.block.header.hash_slow())
+    }
+
+    /// Get the finalized block hash
+    /// In Malachite, blocks have instant finality - once committed, they're immediately finalized
+    async fn get_finalized_hash(&self) -> Result<B256> {
+        // Get the highest decided block height from the store
+        if let Some(max_height) = self.get_max_decided_height().await {
+            if let Some(decided) = self.get_decided_value(max_height).await {
+                return Ok(decided.value.block.header.hash_slow());
+            }
+        }
+
+        // If no decided blocks yet, use genesis
+        Ok(self.genesis.genesis_hash)
+    }
+
+    /// Validate a synced block through the engine API
+    /// Returns true if the block is valid, false otherwise
+    pub async fn validate_synced_block(&self, block: &reth_primitives::Block) -> Result<bool> {
+        // Convert the block to execution payload
+        let sealed_block = reth_primitives::SealedBlock::seal_slow(block.clone());
+        let payload =
+            <reth_node_ethereum::EthEngineTypes as PayloadTypes>::block_to_payload(sealed_block);
+        // Send new_payload to validate it
+        let payload_status = self.engine_handle.new_payload(payload).await?;
+
+        match payload_status.status {
+            PayloadStatusEnum::Valid => {
+                info!("Synced block validated successfully");
+                Ok(true)
+            }
+            PayloadStatusEnum::Invalid { .. } => {
+                warn!("Synced block is invalid: {:?}", payload_status);
+                Ok(false)
+            }
+            PayloadStatusEnum::Syncing => {
+                // The node is still syncing, we might want to retry later
+                info!("Engine is syncing, cannot validate block yet");
+                Ok(false)
+            }
+            PayloadStatusEnum::Accepted => {
+                // Block is accepted but not yet validated
+                info!("Block accepted but not yet validated");
+                Ok(true) // For now, treat as valid
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -609,6 +734,7 @@ pub struct Genesis {
     pub chain_id: String,
     pub validators: Vec<ValidatorInfo>,
     pub app_state: Vec<u8>,
+    pub genesis_hash: B256,
 }
 
 impl Genesis {
@@ -617,6 +743,7 @@ impl Genesis {
             chain_id,
             validators: Vec::new(),
             app_state: Vec::new(),
+            genesis_hash: B256::ZERO,
         }
     }
 
@@ -658,6 +785,8 @@ impl ValidatorInfo {
 pub struct Config {
     pub block_time: std::time::Duration,
     pub create_empty_blocks: bool,
+    pub fee_recipient: alloy_primitives::Address,
+    pub block_build_time_ms: u64,
 }
 
 impl Default for Config {
@@ -671,6 +800,8 @@ impl Config {
         Self {
             block_time: std::time::Duration::from_secs(1),
             create_empty_blocks: true,
+            fee_recipient: alloy_primitives::Address::ZERO,
+            block_build_time_ms: 500,
         }
     }
 }
