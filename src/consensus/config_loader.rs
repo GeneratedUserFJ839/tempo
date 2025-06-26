@@ -80,20 +80,28 @@ moniker = "test-node"
 
 [consensus]
 timeout_propose = "3s"
+timeout_propose_delta = "500ms"
 timeout_prevote = "1s"
+timeout_prevote_delta = "500ms"
 timeout_precommit = "1s"
+timeout_precommit_delta = "500ms"
 timeout_commit = "1s"
 skip_timeout_commit = true
+value_payload = "proposal-and-parts"
+queue_capacity = 100
+timeout_rebroadcast = "5s"
 
 [consensus.p2p]
 listen_addr = "/ip4/0.0.0.0/tcp/26656"
 persistent_peers = ["/ip4/127.0.0.1/tcp/26657", "/ip4/127.0.0.1/tcp/26658"]
 allow_duplicate_ip = true
 transport = "tcp"
+pubsub_max_size = "4.2 MB"
+rpc_max_size = "10.5 MB"
 
 [consensus.p2p.discovery]
 enabled = true
-bootstrap_protocol = "none"
+bootstrap_protocol = "full"
 selector = "random"
 num_outbound_peers = 2
 num_inbound_peers = 2
