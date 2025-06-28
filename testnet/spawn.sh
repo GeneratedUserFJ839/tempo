@@ -181,6 +181,7 @@ for ((i=0; i<$NUM_NODES; i++)); do
         --port $((RETH_PORT_BASE + i)) \
         --discovery.port $((RETH_PORT_BASE + i)) \
         --http \
+        --http.addr 127.0.0.1 \
         --http.port $((RETH_RPC_PORT_BASE + i)) \
         --http.api eth,net,web3 \
         --authrpc.port $((AUTH_RPC_PORT_BASE + i)) \

@@ -31,9 +31,9 @@ error() {
 # Function to check block height of a node
 check_block_height() {
     local port=$1
-    local response=$(curl -v -s -X POST http://127.0.0.1:$port \
+    local response=$(curl -s -X POST http://127.0.0.1:$port \
         -H "Content-Type: application/json" \
-        -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>&1)
+        -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null || echo "")
     
     if [ -n "$response" ] && echo "$response" | grep -q "result"; then
         local block_hex=$(echo "$response" | grep -o '"result":"0x[0-9a-fA-F]*"' | cut -d'"' -f4)
@@ -203,6 +203,9 @@ while true; do
             if [ -f "$TESTNET_DIR/logs/$i/console.log" ]; then
                 echo "Last 30 lines of console log:"
                 tail -n 30 "$TESTNET_DIR/logs/$i/console.log"
+                echo ""
+                echo "Checking for RPC server startup:"
+                grep -i "rpc.*server.*started" "$TESTNET_DIR/logs/$i/console.log" | tail -5 || echo "No RPC startup messages found"
             else
                 echo "No console log found"
             fi
