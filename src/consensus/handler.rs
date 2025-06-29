@@ -14,19 +14,29 @@ pub async fn run_consensus_handler(
     state: &State,
     channels: &mut Channels<MalachiteContext>,
 ) -> eyre::Result<()> {
+    info!("Starting consensus handler loop");
     while let Some(msg) = channels.consensus.recv().await {
+        info!(
+            "Received consensus message: {:?}",
+            std::any::type_name_of_val(&msg)
+        );
         match msg {
             // Consensus is ready to start
             AppMsg::ConsensusReady { reply, .. } => {
-                info!("Consensus engine is ready");
+                info!("Handling ConsensusReady message");
 
                 // Determine the starting height
                 let start_height = state.current_height()?;
                 let validator_set = state.get_validator_set(start_height);
 
+                info!(
+                    "Sending ConsensusReady reply with height={:?}",
+                    start_height
+                );
                 if reply.send((start_height, validator_set)).is_err() {
                     error!("Failed to send ConsensusReady reply");
                 }
+                info!("ConsensusReady reply sent successfully");
             }
 
             // New round has started
