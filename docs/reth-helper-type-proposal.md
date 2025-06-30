@@ -262,32 +262,6 @@ let helper = OpExecutionHelper {
 // Can use original encoded bytes directly
 ```
 
-### Memory and Performance Impact
-
-```mermaid
-flowchart LR
-    subgraph "Memory Usage - OLD"
-        B1[Block<br/>100KB] --> P1[Payload<br/>100KB<br/>duplicated] --> B2[Block<br/>100KB<br/>duplicated again]
-    end
-
-    subgraph "Memory Usage - NEW"
-        B3[Block<br/>100KB] --> H[Helper<br/>~10KB<br/>references] --> B4[Block<br/>100KB<br/>only if needed]
-    end
-
-    style B1 fill:#ff9999
-    style P1 fill:#99ccff
-    style B2 fill:#ff9999
-    style B3 fill:#ff9999
-    style H fill:#ffff99
-    style B4 fill:#ff9999
-```
-
-The helper type acts as a lightweight wrapper that:
-- References data instead of copying when possible
-- Parses only what's needed for validation
-- Defers full block construction until execution
-- Preserves original formats for efficiency
-
 ### Real-World Example: Malachite Integration
 
 ```rust
